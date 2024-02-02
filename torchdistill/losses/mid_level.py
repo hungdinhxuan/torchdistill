@@ -1613,3 +1613,70 @@ class DISTLoss(nn.Module):
         intra_loss = self.tau ** 2 * self.intra_class_relation(y_s, y_t)
         loss = self.beta * inter_loss + self.gamma * intra_loss
         return loss
+
+@register_mid_level_loss
+class MSELoss(nn.Module):
+    """
+    A loss module for the Knowledge Distillation from two embedding features
+    Referred to https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
+
+    :param student_module_path: student model's logit module path.
+    :type student_module_path: str
+    :param student_module_io: 'input' or 'output' of the module in the student model.
+    :type student_module_io: str
+    :param teacher_module_path: teacher model's logit module path.
+    :type teacher_module_path: str
+    :param teacher_module_io: 'input' or 'output' of the module in the teacher model.
+
+    """
+
+    def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io, **kwargs):
+        super().__init__()
+        self.student_module_path = student_module_path
+        self.student_module_io = student_module_io
+        self.teacher_module_path = teacher_module_path
+        self.teacher_module_io = teacher_module_io
+        self.mse_loss = nn.MSELoss()
+
+    def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
+        student_feature_map = student_io_dict[self.student_module_path][self.student_module_io]
+        teacher_feature_map = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        hidden_rep_loss = self.mse_loss(student_feature_map, teacher_feature_map)
+        return hidden_rep_loss
+
+
+@register_mid_level_loss
+class CosineLoss(nn.Module):
+    """
+    A loss module for the Knowledge Distillation from two embedding features
+    Referred to https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
+
+    :param student_module_path: student model's logit module path.
+    :type student_module_path: str
+    :param student_module_io: 'input' or 'output' of the module in the student model.
+    :type student_module_io: str
+    :param teacher_module_path: teacher model's logit module path.
+    :type teacher_module_path: str
+    :param teacher_module_io: 'input' or 'output' of the module in the teacher model.
+  
+    """
+
+    def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io, size=64, **kwargs):
+        super().__init__()
+        self.student_module_path = student_module_path
+        self.student_module_io = student_module_io
+        self.teacher_module_path = teacher_module_path
+        self.teacher_module_io = teacher_module_io
+        self.cosine_loss = nn.CosineEmbeddingLoss()
+        self.size = size
+
+    def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
+        student_hidden_representation = student_io_dict[self.student_module_path][self.student_module_io]
+        teacher_hidden_representation = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        # print(student_hidden_representation)
+        student_hidden_representation = student_hidden_representation.view(self.size, -1)
+        teacher_hidden_representation = teacher_hidden_representation.view(self.size, -1)
+
+        hidden_rep_loss = self.cosine_loss(student_hidden_representation, teacher_hidden_representation, target=torch.ones(self.size).to(student_hidden_representation.device))
+
+        return hidden_rep_loss
