@@ -1,5 +1,5 @@
 import math
-
+import torch.nn.functional as F
 import torch
 from torch import nn
 from torch.nn.functional import adaptive_avg_pool2d, adaptive_max_pool2d, normalize, cosine_similarity
@@ -1680,3 +1680,89 @@ class CosineLoss(nn.Module):
         hidden_rep_loss = self.cosine_loss(student_hidden_representation, teacher_hidden_representation, target=torch.ones(self.size).to(student_hidden_representation.device))
 
         return hidden_rep_loss
+
+
+@register_mid_level_loss
+class DKDLoss(nn.Module):
+    """
+    A loss module for Decoupled Knowledge Distillation(CVPR 2022)
+    Referred to https://github.com/hunto/image_classification_sota/blob/main/lib/models/losses/dist_kd.py
+
+    Tao Huang, Shan You, Fei Wang, Chen Qian, Chang Xu: `"https://proceedings.neurips.cc/paper_files/paper/2022/hash/da669dfd3c36c93905a17ddba01eef06-Abstract-Conference.html>`_ @ NeurIPS 2022 (2022)
+
+    :param student_module_path: student model's logit module path.
+    :type student_module_path: str
+    :param student_module_io: 'input' or 'output' of the module in the student model.
+    :type student_module_io: str
+    :param teacher_module_path: teacher model's logit module path.
+    :type teacher_module_path: str
+    :param teacher_module_io: 'input' or 'output' of the module in the teacher model.
+    :param beta: balancing factor for inter-loss.
+    :type beta: float
+    :param gamma: balancing factor for intra-loss.
+    :type gamma: float
+    :param tau: hyperparameter :math:`\\tau` to soften class-probability distributions.
+    :type tau: float
+    """
+
+    def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io,
+                 alpha=1.0, beta=1.0, T=1.0, **kwargs):
+        super().__init__()
+        self.student_module_path = student_module_path
+        self.student_module_io = student_module_io
+        self.teacher_module_path = teacher_module_path
+        self.teacher_module_io = teacher_module_io
+        self.beta = beta
+        self.alpha = alpha
+        self.beta = beta
+        self.T = T
+
+    def dkd_loss(self, s_logits, t_logits, labels):
+        gt_mask = self.get_gt_mask(s_logits, labels)
+        other_mask = self.get_other_mask(s_logits, labels)
+        s_pred = F.softmax(s_logits / self.T, dim=1)
+        t_pred = F.softmax(t_logits / self.T, dim=1)
+        s_pred = self.cat_mask(s_pred, gt_mask, other_mask)
+        t_pred = self.cat_mask(t_pred, gt_mask, other_mask)
+        s_log_pred = torch.log(s_pred)
+        tckd_loss = (
+            F.kl_div(s_log_pred, t_pred, size_average=False)
+            * (self.T**2)
+            / labels.shape[0]
+        )
+        pred_teacher_part2 = F.softmax(
+            t_logits / self.T - 1000.0 * gt_mask, dim=1
+        )
+        log_pred_student_part2 = F.log_softmax(
+            s_logits / self.T - 1000.0 * gt_mask, dim=1
+        )
+        nckd_loss = (
+            F.kl_div(log_pred_student_part2, pred_teacher_part2, size_average=False)
+            * (self.T**2)
+            / labels.shape[0]
+        )
+        return self.alpha * tckd_loss + self.beta * nckd_loss
+    
+    def get_gt_mask(self, logits, labels):
+        labels = labels.reshape(-1)
+        mask = torch.zeros_like(logits).scatter_(1, labels.unsqueeze(1), 1).bool()
+        return mask
+    
+    def get_other_mask(self, logits, labels):
+        labels = labels.reshape(-1)
+        mask = torch.ones_like(logits).scatter_(1, labels.unsqueeze(1), 0).bool()
+        return mask
+    
+    def cat_mask(self, t, mask1, mask2):
+        t1 = (t * mask1).sum(dim=1, keepdims=True)
+        t2 = (t * mask2).sum(1, keepdims=True)
+        rt = torch.cat([t1, t2], dim=1)
+        return rt
+
+    def forward(self, student_io_dict, teacher_io_dict, labels, *args, **kwargs):
+        student_logits = student_io_dict[self.student_module_path][self.student_module_io]
+        teacher_logits = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        loss = self.dkd_loss(student_logits, teacher_logits, labels)
+
+        return loss
+
