@@ -1,9 +1,10 @@
 import math
-
+import torch.nn.functional as F
 import torch
 from torch import nn
 from torch.nn.functional import adaptive_avg_pool2d, adaptive_max_pool2d, normalize, cosine_similarity
-
+import numpy as np
+import torch.distributed as dist
 from .registry import register_loss_wrapper, register_mid_level_loss
 from ..common.constant import def_logger
 
@@ -13,6 +14,9 @@ logger = def_logger.getChild(__name__)
 def _extract_feature_map(io_dict, feature_map_config):
     io_type = feature_map_config['io']
     module_path = feature_map_config['path']
+    # print("Extracting feature map from", module_path, io_type)
+    # print("Available keys in io_dict", io_dict.keys())
+    # print(f"Available keys in io_dict[module_path]: {module_path}", io_dict[module_path].keys())
     return io_dict[module_path][io_type]
 
 
@@ -40,6 +44,7 @@ class SimpleLossWrapper(nn.Module):
             target:
               uses_label: True
     """
+
     def __init__(self, low_level_loss, **kwargs):
         super().__init__()
         self.low_level_loss = low_level_loss
@@ -49,7 +54,8 @@ class SimpleLossWrapper(nn.Module):
         self.input_key = input_config['io']
         target_config = kwargs.get('target', dict())
         self.uses_label = target_config.get('uses_label', False)
-        self.is_target_from_teacher = target_config.get('is_from_teacher', None)
+        self.is_target_from_teacher = target_config.get(
+            'is_from_teacher', None)
         self.target_module_path = target_config.get('module_path', None)
         self.target_key = target_config.get('io', None)
 
@@ -101,6 +107,7 @@ class DictLossWrapper(SimpleLossWrapper):
               out: 1.0
               aux: 0.5
     """
+
     def __init__(self, low_level_loss, weights, **kwargs):
         super().__init__(low_level_loss, **kwargs)
         self.weights = weights
@@ -115,7 +122,8 @@ class DictLossWrapper(SimpleLossWrapper):
                                               self.target_module_path, self.target_key)
         loss = None
         for key, weight in self.weights.items():
-            sub_loss = self.low_level_loss(input_batch[key], target_batch, *args, **kwargs)
+            sub_loss = self.low_level_loss(
+                input_batch[key], target_batch, *args, **kwargs)
             if loss is None:
                 loss = weight * sub_loss
             else:
@@ -154,6 +162,7 @@ class KDLoss(nn.KLDivLoss):
     :param reduction: ``reduction`` for KLDivLoss. If ``reduction`` = 'batchmean', CrossEntropyLoss's ``reduction`` will be 'mean'.
     :type reduction: str or None
     """
+
     def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io,
                  temperature, alpha=None, beta=None, reduction='batchmean', **kwargs):
         super().__init__(reduction=reduction)
@@ -165,7 +174,8 @@ class KDLoss(nn.KLDivLoss):
         self.alpha = alpha
         self.beta = 1 - alpha if beta is None else beta
         cel_reduction = 'mean' if reduction == 'batchmean' else reduction
-        self.cross_entropy_loss = nn.CrossEntropyLoss(reduction=cel_reduction, **kwargs)
+        self.cross_entropy_loss = nn.CrossEntropyLoss(
+            reduction=cel_reduction, **kwargs)
 
     def forward(self, student_io_dict, teacher_io_dict, targets=None, *args, **kwargs):
         student_logits = student_io_dict[self.student_module_path][self.student_module_io]
@@ -225,6 +235,7 @@ class FSPLoss(nn.Module):
                   path: 'layer2'
                 weight: 1
     """
+
     def __init__(self, fsp_pairs, **kwargs):
         super().__init__()
         self.fsp_pairs = fsp_pairs
@@ -235,10 +246,12 @@ class FSPLoss(nn.Module):
         second_h, second_w = second_feature_map.shape[2:4]
         target_h, target_w = min(first_h, second_h), min(first_w, second_w)
         if first_h > target_h or first_w > target_w:
-            first_feature_map = adaptive_max_pool2d(first_feature_map, (target_h, target_w))
+            first_feature_map = adaptive_max_pool2d(
+                first_feature_map, (target_h, target_w))
 
         if second_h > target_h or second_w > target_w:
-            second_feature_map = adaptive_max_pool2d(second_feature_map, (target_h, target_w))
+            second_feature_map = adaptive_max_pool2d(
+                second_feature_map, (target_h, target_w))
 
         first_feature_map = first_feature_map.flatten(2)
         second_feature_map = second_feature_map.flatten(2)
@@ -249,14 +262,21 @@ class FSPLoss(nn.Module):
         fsp_loss = 0
         batch_size = None
         for pair_name, pair_config in self.fsp_pairs.items():
-            student_first_feature_map = _extract_feature_map(student_io_dict, pair_config['student_first'])
-            student_second_feature_map = _extract_feature_map(student_io_dict, pair_config['student_second'])
-            student_fsp_matrices = self.compute_fsp_matrix(student_first_feature_map, student_second_feature_map)
-            teacher_first_feature_map = _extract_feature_map(teacher_io_dict, pair_config['teacher_first'])
-            teacher_second_feature_map = _extract_feature_map(teacher_io_dict, pair_config['teacher_second'])
-            teacher_fsp_matrices = self.compute_fsp_matrix(teacher_first_feature_map, teacher_second_feature_map)
+            student_first_feature_map = _extract_feature_map(
+                student_io_dict, pair_config['student_first'])
+            student_second_feature_map = _extract_feature_map(
+                student_io_dict, pair_config['student_second'])
+            student_fsp_matrices = self.compute_fsp_matrix(
+                student_first_feature_map, student_second_feature_map)
+            teacher_first_feature_map = _extract_feature_map(
+                teacher_io_dict, pair_config['teacher_first'])
+            teacher_second_feature_map = _extract_feature_map(
+                teacher_io_dict, pair_config['teacher_second'])
+            teacher_fsp_matrices = self.compute_fsp_matrix(
+                teacher_first_feature_map, teacher_second_feature_map)
             factor = pair_config.get('weight', 1)
-            fsp_loss += factor * (student_fsp_matrices - teacher_fsp_matrices).norm(dim=1).sum()
+            fsp_loss += factor * (student_fsp_matrices -
+                                  teacher_fsp_matrices).norm(dim=1).sum()
             if batch_size is None:
                 batch_size = student_first_feature_map.shape[0]
         return fsp_loss / batch_size
@@ -304,6 +324,7 @@ class ATLoss(nn.Module):
                 weight: 1
             mode: 'code'
     """
+
     def __init__(self, at_pairs, mode='code', **kwargs):
         super().__init__()
         self.at_pairs = at_pairs
@@ -333,13 +354,19 @@ class ATLoss(nn.Module):
         at_loss = 0
         batch_size = None
         for pair_name, pair_config in self.at_pairs.items():
-            student_feature_map = _extract_feature_map(student_io_dict, pair_config['student'])
-            teacher_feature_map = _extract_feature_map(teacher_io_dict, pair_config['teacher'])
+            student_feature_map = _extract_feature_map(
+                student_io_dict, pair_config['student'])
+            teacher_feature_map = _extract_feature_map(
+                teacher_io_dict, pair_config['teacher'])
             factor = pair_config.get('weight', 1)
             if self.mode == 'paper':
-                at_loss += factor * self.compute_at_loss_paper(student_feature_map, teacher_feature_map)
+                at_loss += factor * \
+                    self.compute_at_loss_paper(
+                        student_feature_map, teacher_feature_map)
             else:
-                at_loss += factor * self.compute_at_loss(student_feature_map, teacher_feature_map)
+                at_loss += factor * \
+                    self.compute_at_loss(
+                        student_feature_map, teacher_feature_map)
             if batch_size is None:
                 batch_size = len(student_feature_map)
         return at_loss / batch_size if self.mode == 'paper' else at_loss
@@ -386,25 +413,31 @@ class PKTLoss(nn.Module):
 
     def cosine_similarity_loss(self, student_outputs, teacher_outputs):
         # Normalize each vector by its norm
-        norm_s = torch.sqrt(torch.sum(student_outputs ** 2, dim=1, keepdim=True))
+        norm_s = torch.sqrt(
+            torch.sum(student_outputs ** 2, dim=1, keepdim=True))
         student_outputs = student_outputs / (norm_s + self.eps)
         student_outputs[student_outputs != student_outputs] = 0
 
-        norm_t = torch.sqrt(torch.sum(teacher_outputs ** 2, dim=1, keepdim=True))
+        norm_t = torch.sqrt(
+            torch.sum(teacher_outputs ** 2, dim=1, keepdim=True))
         teacher_outputs = teacher_outputs / (norm_t + self.eps)
         teacher_outputs[teacher_outputs != teacher_outputs] = 0
 
         # Calculate the cosine similarity
-        student_similarity = torch.mm(student_outputs, student_outputs.transpose(0, 1))
-        teacher_similarity = torch.mm(teacher_outputs, teacher_outputs.transpose(0, 1))
+        student_similarity = torch.mm(
+            student_outputs, student_outputs.transpose(0, 1))
+        teacher_similarity = torch.mm(
+            teacher_outputs, teacher_outputs.transpose(0, 1))
 
         # Scale cosine similarity to 0..1
         student_similarity = (student_similarity + 1.0) / 2.0
         teacher_similarity = (teacher_similarity + 1.0) / 2.0
 
         # Transform them into probabilities
-        student_similarity = student_similarity / torch.sum(student_similarity, dim=1, keepdim=True)
-        teacher_similarity = teacher_similarity / torch.sum(teacher_similarity, dim=1, keepdim=True)
+        student_similarity = student_similarity / \
+            torch.sum(student_similarity, dim=1, keepdim=True)
+        teacher_similarity = teacher_similarity / \
+            torch.sum(teacher_similarity, dim=1, keepdim=True)
 
         # Calculate the KL-divergence
         return torch.mean(teacher_similarity *
@@ -443,6 +476,7 @@ class FTLoss(nn.Module):
             paraphraser_path: 'paraphraser'
             translator_path: 'translator'
     """
+
     def __init__(self, p=1, reduction='mean', paraphraser_path='paraphraser',
                  translator_path='translator', **kwargs):
         super().__init__()
@@ -452,14 +486,19 @@ class FTLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
-        paraphraser_flat_outputs = teacher_io_dict[self.paraphraser_path]['output'].flatten(1)
-        translator_flat_outputs = student_io_dict[self.translator_path]['output'].flatten(1)
-        norm_paraphraser_flat_outputs = paraphraser_flat_outputs / paraphraser_flat_outputs.norm(dim=1).unsqueeze(1)
-        norm_translator_flat_outputs = translator_flat_outputs / translator_flat_outputs.norm(dim=1).unsqueeze(1)
+        paraphraser_flat_outputs = teacher_io_dict[self.paraphraser_path]['output'].flatten(
+            1)
+        translator_flat_outputs = student_io_dict[self.translator_path]['output'].flatten(
+            1)
+        norm_paraphraser_flat_outputs = paraphraser_flat_outputs / \
+            paraphraser_flat_outputs.norm(dim=1).unsqueeze(1)
+        norm_translator_flat_outputs = translator_flat_outputs / \
+            translator_flat_outputs.norm(dim=1).unsqueeze(1)
         if self.norm_p == 1:
             return nn.functional.l1_loss(norm_translator_flat_outputs, norm_paraphraser_flat_outputs,
                                          reduction=self.reduction)
-        ft_loss = torch.norm(norm_translator_flat_outputs - norm_paraphraser_flat_outputs, self.norm_p, dim=1)
+        ft_loss = torch.norm(norm_translator_flat_outputs -
+                             norm_paraphraser_flat_outputs, self.norm_p, dim=1)
         return ft_loss.mean() if self.reduction == 'mean' else ft_loss.sum()
 
 
@@ -519,6 +558,7 @@ class AltActTransferLoss(nn.Module):
             margin: 1.0
             reduction: 'mean'
     """
+
     def __init__(self, feature_pairs, margin, reduction, **kwargs):
         super().__init__()
         self.feature_pairs = feature_pairs
@@ -535,11 +575,14 @@ class AltActTransferLoss(nn.Module):
         dab_loss = 0
         batch_size = None
         for pair_name, pair_config in self.feature_pairs.items():
-            student_feature_map = _extract_feature_map(student_io_dict, pair_config['student'])
-            teacher_feature_map = _extract_feature_map(teacher_io_dict, pair_config['teacher'])
+            student_feature_map = _extract_feature_map(
+                student_io_dict, pair_config['student'])
+            teacher_feature_map = _extract_feature_map(
+                teacher_io_dict, pair_config['teacher'])
             factor = pair_config.get('weight', 1)
             dab_loss += \
-                factor * self.compute_alt_act_transfer_loss(student_feature_map, teacher_feature_map, self.margin)
+                factor * self.compute_alt_act_transfer_loss(
+                    student_feature_map, teacher_feature_map, self.margin)
             if batch_size is None:
                 batch_size = student_feature_map.shape[0]
         return dab_loss / batch_size if self.reduction == 'mean' else dab_loss
@@ -575,6 +618,7 @@ class RKDLoss(nn.Module):
             angle_factor: 2.0
             reduction: 'mean'
     """
+
     def __init__(self, student_output_path, teacher_output_path, dist_factor, angle_factor, reduction, **kwargs):
         super().__init__()
         self.student_output_path = student_output_path
@@ -587,7 +631,8 @@ class RKDLoss(nn.Module):
     def pdist(e, squared=False, eps=1e-12):
         e_square = e.pow(2).sum(dim=1)
         prod = e @ e.t()
-        res = (e_square.unsqueeze(1) + e_square.unsqueeze(0) - 2 * prod).clamp(min=eps)
+        res = (e_square.unsqueeze(1) +
+               e_square.unsqueeze(0) - 2 * prod).clamp(min=eps)
         if not squared:
             res = res.sqrt()
 
@@ -614,20 +659,26 @@ class RKDLoss(nn.Module):
             return 0
 
         with torch.no_grad():
-            td = (teacher_flat_outputs.unsqueeze(0) - teacher_flat_outputs.unsqueeze(1))
+            td = (teacher_flat_outputs.unsqueeze(0) -
+                  teacher_flat_outputs.unsqueeze(1))
             norm_td = normalize(td, p=2, dim=2)
             t_angle = torch.bmm(norm_td, norm_td.transpose(1, 2)).view(-1)
 
-        sd = (student_flat_outputs.unsqueeze(0) - student_flat_outputs.unsqueeze(1))
+        sd = (student_flat_outputs.unsqueeze(0) -
+              student_flat_outputs.unsqueeze(1))
         norm_sd = normalize(sd, p=2, dim=2)
         s_angle = torch.bmm(norm_sd, norm_sd.transpose(1, 2)).view(-1)
         return self.smooth_l1_loss(s_angle, t_angle)
 
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
-        teacher_flat_outputs = teacher_io_dict[self.teacher_output_path]['output'].flatten(1)
-        student_flat_outputs = student_io_dict[self.student_output_path]['output'].flatten(1)
-        rkd_distance_loss = self.compute_rkd_distance_loss(teacher_flat_outputs, student_flat_outputs)
-        rkd_angle_loss = self.compute_rkd_angle_loss(teacher_flat_outputs, student_flat_outputs)
+        teacher_flat_outputs = teacher_io_dict[self.teacher_output_path]['output'].flatten(
+            1)
+        student_flat_outputs = student_io_dict[self.student_output_path]['output'].flatten(
+            1)
+        rkd_distance_loss = self.compute_rkd_distance_loss(
+            teacher_flat_outputs, student_flat_outputs)
+        rkd_angle_loss = self.compute_rkd_angle_loss(
+            teacher_flat_outputs, student_flat_outputs)
         return self.dist_factor * rkd_distance_loss + self.angle_factor * rkd_angle_loss
 
 
@@ -682,6 +733,7 @@ class VIDLoss(nn.Module):
                 weight: 1
             margin: 1.0
     """
+
     def __init__(self, feature_pairs, **kwargs):
         super().__init__()
         self.feature_pairs = feature_pairs
@@ -689,10 +741,14 @@ class VIDLoss(nn.Module):
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
         vid_loss = 0
         for pair_name, pair_config in self.feature_pairs.items():
-            pred_mean, pred_var = _extract_feature_map(student_io_dict, pair_config['student'])
-            teacher_feature_map = _extract_feature_map(teacher_io_dict, pair_config['teacher'])
+            pred_mean, pred_var = _extract_feature_map(
+                student_io_dict, pair_config['student'])
+            teacher_feature_map = _extract_feature_map(
+                teacher_io_dict, pair_config['teacher'])
             factor = pair_config.get('weight', 1)
-            neg_log_prob = 0.5 * ((pred_mean - teacher_feature_map) ** 2 / pred_var + torch.log(pred_var))
+            neg_log_prob = 0.5 * \
+                ((pred_mean - teacher_feature_map) **
+                 2 / pred_var + torch.log(pred_var))
             vid_loss += factor * neg_log_prob.mean()
         return vid_loss
 
@@ -727,6 +783,7 @@ class CCKDLoss(nn.Module):
               max_p: 2
             reduction: 'batchmean'
     """
+
     def __init__(self, student_linear_path, teacher_linear_path, kernel_config, reduction, **kwargs):
         super().__init__()
         self.student_linear_path = student_linear_path
@@ -736,7 +793,8 @@ class CCKDLoss(nn.Module):
             self.gamma = kernel_config['gamma']
             self.max_p = kernel_config['max_p']
         elif self.kernel_type not in ('bilinear', 'gaussian'):
-            raise ValueError('self.kernel_type `{}` is not expected'.format(self.kernel_type))
+            raise ValueError(
+                'self.kernel_type `{}` is not expected'.format(self.kernel_type))
         self.reduction = reduction
 
     @staticmethod
@@ -761,13 +819,18 @@ class CCKDLoss(nn.Module):
         student_linear_outputs = student_io_dict[self.student_linear_path]['output']
         batch_size = teacher_linear_outputs.shape[0]
         if self.kernel_type == 'bilinear':
-            teacher_cc = self.compute_cc_mat_by_bilinear_pool(teacher_linear_outputs)
-            student_cc = self.compute_cc_mat_by_bilinear_pool(student_linear_outputs)
+            teacher_cc = self.compute_cc_mat_by_bilinear_pool(
+                teacher_linear_outputs)
+            student_cc = self.compute_cc_mat_by_bilinear_pool(
+                student_linear_outputs)
         elif self.kernel_type == 'gaussian':
-            teacher_cc = self.compute_cc_mat_by_gaussian_rbf(teacher_linear_outputs)
-            student_cc = self.compute_cc_mat_by_gaussian_rbf(student_linear_outputs)
+            teacher_cc = self.compute_cc_mat_by_gaussian_rbf(
+                teacher_linear_outputs)
+            student_cc = self.compute_cc_mat_by_gaussian_rbf(
+                student_linear_outputs)
         else:
-            raise ValueError('self.kernel_type `{}` is not expected'.format(self.kernel_type))
+            raise ValueError(
+                'self.kernel_type `{}` is not expected'.format(self.kernel_type))
 
         cc_loss = torch.dist(student_cc, teacher_cc, 2)
         return cc_loss / (batch_size ** 2) if self.reduction == 'batchmean' else cc_loss
@@ -797,6 +860,7 @@ class SPKDLoss(nn.Module):
             student_output_path: 'layer4'
             reduction: 'batchmean'
     """
+
     def __init__(self, student_output_path, teacher_output_path, reduction, **kwargs):
         super().__init__()
         self.student_output_path = student_output_path
@@ -914,17 +978,21 @@ class CRDLoss(nn.Module):
         self.unigrams = torch.ones(output_size)
         self.num_negative_samples = num_negative_samples
         self.num_samples = num_samples
-        self.register_buffer('params', torch.tensor([num_negative_samples, temperature, -1, -1, momentum]))
+        self.register_buffer('params', torch.tensor(
+            [num_negative_samples, temperature, -1, -1, momentum]))
         stdv = 1.0 / math.sqrt(input_size / 3)
-        self.register_buffer('memory_v1', torch.rand(output_size, input_size).mul_(2 * stdv).add_(-stdv))
-        self.register_buffer('memory_v2', torch.rand(output_size, input_size).mul_(2 * stdv).add_(-stdv))
+        self.register_buffer('memory_v1', torch.rand(
+            output_size, input_size).mul_(2 * stdv).add_(-stdv))
+        self.register_buffer('memory_v2', torch.rand(
+            output_size, input_size).mul_(2 * stdv).add_(-stdv))
         self.probs, self.alias = None, None
         self.init_prob_alias(self.unigrams)
 
     def draw(self, n):
         # Draw n samples from multinomial
         k = self.alias.size(0)
-        kk = torch.zeros(n, dtype=torch.long, device=self.prob.device).random_(0, k)
+        kk = torch.zeros(n, dtype=torch.long,
+                         device=self.prob.device).random_(0, k)
         prob = self.probs.index_select(0, kk)
         alias = self.alias.index_select(0, kk)
         # b is whether a random number is greater than q
@@ -946,29 +1014,36 @@ class CRDLoss(nn.Module):
 
         # original score computation
         if contrast_idx is None:
-            contrast_idx = self.draw(batch_size * (self.num_negative_samples + 1)).view(batch_size, -1)
+            contrast_idx = self.draw(
+                batch_size * (self.num_negative_samples + 1)).view(batch_size, -1)
             contrast_idx.select(1, 0).copy_(pos_indices.data)
 
         # sample
-        weight_v1 = torch.index_select(self.memory_v1, 0, contrast_idx.view(-1)).detach()
+        weight_v1 = torch.index_select(
+            self.memory_v1, 0, contrast_idx.view(-1)).detach()
         weight_v1 = weight_v1.view(batch_size, param_k + 1, input_size)
-        out_v2 = torch.bmm(weight_v1, teacher_embed.view(batch_size, input_size, 1))
+        out_v2 = torch.bmm(weight_v1, teacher_embed.view(
+            batch_size, input_size, 1))
         out_v2 = torch.exp(torch.div(out_v2, param_t))
         # sample
-        weight_v2 = torch.index_select(self.memory_v2, 0, contrast_idx.view(-1)).detach()
+        weight_v2 = torch.index_select(
+            self.memory_v2, 0, contrast_idx.view(-1)).detach()
         weight_v2 = weight_v2.view(batch_size, param_k + 1, input_size)
-        out_v1 = torch.bmm(weight_v2, student_embed.view(batch_size, input_size, 1))
+        out_v1 = torch.bmm(weight_v2, student_embed.view(
+            batch_size, input_size, 1))
         out_v1 = torch.exp(torch.div(out_v1, param_t))
 
         # set z if haven't been set yet
         if z_v1 < 0:
             self.params[2] = out_v1.mean() * output_size
             z_v1 = self.params[2].clone().detach().item()
-            logger.info('normalization constant z_v1 is set to {:.1f}'.format(z_v1))
+            logger.info(
+                'normalization constant z_v1 is set to {:.1f}'.format(z_v1))
         if z_v2 < 0:
             self.params[3] = out_v2.mean() * output_size
             z_v2 = self.params[3].clone().detach().item()
-            logger.info('normalization constant z_v2 is set to {:.1f}'.format(z_v2))
+            logger.info(
+                'normalization constant z_v2 is set to {:.1f}'.format(z_v2))
 
         # compute out_v1, out_v2
         out_v1 = torch.div(out_v1, z_v1).contiguous()
@@ -983,7 +1058,8 @@ class CRDLoss(nn.Module):
             updated_v1 = l_pos.div(l_norm)
             self.memory_v1.index_copy_(0, pos_indices, updated_v1)
 
-            ab_pos = torch.index_select(self.memory_v2, 0, pos_indices.view(-1))
+            ab_pos = torch.index_select(
+                self.memory_v2, 0, pos_indices.view(-1))
             ab_pos.mul_(momentum)
             ab_pos.add_(torch.mul(teacher_embed, 1 - momentum))
             ab_norm = ab_pos.pow(2).sum(1, keepdim=True).pow(0.5)
@@ -1004,7 +1080,8 @@ class CRDLoss(nn.Module):
 
         # loss for K negative pair
         p_neg = x.narrow(1, 1, m)
-        log_d0 = torch.div(p_neg.clone().fill_(m * pn), p_neg.add(m * pn + self.eps)).log_()
+        log_d0 = torch.div(p_neg.clone().fill_(m * pn),
+                           p_neg.add(m * pn + self.eps)).log_()
 
         loss = - (log_d1.sum(0) + log_d0.view(-1, 1).sum(0)) / batch_size
         return loss
@@ -1015,7 +1092,8 @@ class CRDLoss(nn.Module):
         teacher_linear_outputs = teacher_io_dict[self.teacher_norm_module_path]['output']
         student_linear_outputs = student_io_dict[self.student_norm_module_path]['output']
         supp_dict = student_io_dict[self.student_empty_module_path]['input']
-        pos_idx, contrast_idx = supp_dict['pos_idx'], supp_dict.get('contrast_idx', None)
+        pos_idx, contrast_idx = supp_dict['pos_idx'], supp_dict.get(
+            'contrast_idx', None)
         device = student_linear_outputs.device
         pos_idx = pos_idx.to(device)
         if contrast_idx is not None:
@@ -1026,7 +1104,8 @@ class CRDLoss(nn.Module):
             self.alias.to(device)
             self.to(device)
 
-        out_s, out_t = self.contrast_memory(student_linear_outputs, teacher_linear_outputs, pos_idx, contrast_idx)
+        out_s, out_t = self.contrast_memory(
+            student_linear_outputs, teacher_linear_outputs, pos_idx, contrast_idx)
         student_contrast_loss = self.compute_contrast_loss(out_s)
         teacher_contrast_loss = self.compute_contrast_loss(out_t)
         loss = student_contrast_loss + teacher_contrast_loss
@@ -1059,6 +1138,7 @@ class AuxSSKDLoss(nn.CrossEntropyLoss):
             module_io: 'output'
             reduction: 'mean'
     """
+
     def __init__(self, module_path='ss_module', module_io='output', reduction='mean', **kwargs):
         super().__init__(reduction=reduction, **kwargs)
         self.module_path = module_path
@@ -1074,10 +1154,12 @@ class AuxSSKDLoss(nn.CrossEntropyLoss):
         aug_indices = (torch.arange(batch_size) % 4 != 0)
         normal_rep = ss_module_outputs[normal_indices]
         aug_rep = ss_module_outputs[aug_indices]
-        normal_rep = normal_rep.unsqueeze(2).expand(-1, -1, three_forth_batch_size).transpose(0, 2)
+        normal_rep = normal_rep.unsqueeze(
+            2).expand(-1, -1, three_forth_batch_size).transpose(0, 2)
         aug_rep = aug_rep.unsqueeze(2).expand(-1, -1, one_forth_batch_size)
         cos_similarities = cosine_similarity(aug_rep, normal_rep, dim=1)
-        targets = torch.arange(one_forth_batch_size).unsqueeze(1).expand(-1, 3).contiguous().view(-1)
+        targets = torch.arange(one_forth_batch_size).unsqueeze(
+            1).expand(-1, 3).contiguous().view(-1)
         targets = targets[:three_forth_batch_size].long().to(device)
         return super().forward(cos_similarities, targets)
 
@@ -1139,13 +1221,15 @@ class SSKDLoss(nn.Module):
             loss_weights: [1.0, 0.9, 10.0, 2.7]
             reduction: 'batchmean'
     """
+
     def __init__(self, student_linear_module_path, teacher_linear_module_path, student_ss_module_path,
                  teacher_ss_module_path, kl_temp, ss_temp, tf_temp, ss_ratio, tf_ratio,
                  student_linear_module_io='output', teacher_linear_module_io='output',
                  student_ss_module_io='output', teacher_ss_module_io='output',
                  loss_weights=None, reduction='batchmean', **kwargs):
         super().__init__()
-        self.loss_weights = [1.0, 1.0, 1.0, 1.0] if loss_weights is None else loss_weights
+        self.loss_weights = [1.0, 1.0, 1.0,
+                             1.0] if loss_weights is None else loss_weights
         self.kl_temp = kl_temp
         self.ss_temp = ss_temp
         self.tf_temp = tf_temp
@@ -1168,7 +1252,8 @@ class SSKDLoss(nn.Module):
                                     three_forth_batch_size, one_forth_batch_size):
         normal_feat = ss_module_outputs[normal_indices]
         aug_feat = ss_module_outputs[aug_indices]
-        normal_feat = normal_feat.unsqueeze(2).expand(-1, -1, three_forth_batch_size).transpose(0, 2)
+        normal_feat = normal_feat.unsqueeze(
+            2).expand(-1, -1, three_forth_batch_size).transpose(0, 2)
         aug_feat = aug_feat.unsqueeze(2).expand(-1, -1, one_forth_batch_size)
         return cosine_similarity(aug_feat, normal_feat, dim=1)
 
@@ -1181,17 +1266,20 @@ class SSKDLoss(nn.Module):
         one_forth_batch_size = batch_size - three_forth_batch_size
         normal_indices = (torch.arange(batch_size) % 4 == 0)
         aug_indices = (torch.arange(batch_size) % 4 != 0)
-        ce_loss = self.cross_entropy_loss(student_linear_outputs[normal_indices], targets)
+        ce_loss = self.cross_entropy_loss(
+            student_linear_outputs[normal_indices], targets)
         kl_loss = self.kldiv_loss(torch.log_softmax(student_linear_outputs[normal_indices] / self.kl_temp, dim=1),
                                   torch.softmax(teacher_linear_outputs[normal_indices] / self.kl_temp, dim=1))
         kl_loss *= (self.kl_temp ** 2)
 
         # error level ranking
-        aug_knowledges = torch.softmax(teacher_linear_outputs[aug_indices] / self.tf_temp, dim=1)
+        aug_knowledges = torch.softmax(
+            teacher_linear_outputs[aug_indices] / self.tf_temp, dim=1)
         aug_targets = targets.unsqueeze(1).expand(-1, 3).contiguous().view(-1)
         aug_targets = aug_targets[:three_forth_batch_size].long().to(device)
         ranks = torch.argsort(aug_knowledges, dim=1, descending=True)
-        ranks = torch.argmax(torch.eq(ranks, aug_targets.unsqueeze(1)).long(), dim=1)  # groundtruth label's rank
+        ranks = torch.argmax(torch.eq(ranks, aug_targets.unsqueeze(
+            1)).long(), dim=1)  # groundtruth label's rank
         indices = torch.argsort(ranks)
         tmp = torch.nonzero(ranks, as_tuple=True)[0]
         wrong_num = tmp.numel()
@@ -1210,10 +1298,12 @@ class SSKDLoss(nn.Module):
         t_cos_similarities = t_cos_similarities.detach()
 
         aug_targets = \
-            torch.arange(one_forth_batch_size).unsqueeze(1).expand(-1, 3).contiguous().view(-1)
+            torch.arange(one_forth_batch_size).unsqueeze(
+                1).expand(-1, 3).contiguous().view(-1)
         aug_targets = aug_targets[:three_forth_batch_size].long().to(device)
         ranks = torch.argsort(t_cos_similarities, dim=1, descending=True)
-        ranks = torch.argmax(torch.eq(ranks, aug_targets.unsqueeze(1)).long(), dim=1)  # groundtruth label's rank
+        ranks = torch.argmax(torch.eq(ranks, aug_targets.unsqueeze(
+            1)).long(), dim=1)  # groundtruth label's rank
         indices = torch.argsort(ranks)
         tmp = torch.nonzero(ranks, as_tuple=True)[0]
         wrong_num = tmp.numel()
@@ -1225,8 +1315,10 @@ class SSKDLoss(nn.Module):
         ss_loss = self.kldiv_loss(torch.log_softmax(s_cos_similarities[distill_index_ss] / self.ss_temp, dim=1),
                                   torch.softmax(t_cos_similarities[distill_index_ss] / self.ss_temp, dim=1))
         ss_loss *= (self.ss_temp ** 2)
-        log_aug_outputs = torch.log_softmax(student_linear_outputs[aug_indices] / self.tf_temp, dim=1)
-        tf_loss = self.kldiv_loss(log_aug_outputs[distill_index_tf], aug_knowledges[distill_index_tf])
+        log_aug_outputs = torch.log_softmax(
+            student_linear_outputs[aug_indices] / self.tf_temp, dim=1)
+        tf_loss = self.kldiv_loss(
+            log_aug_outputs[distill_index_tf], aug_knowledges[distill_index_tf])
         tf_loss *= (self.tf_temp ** 2)
         total_loss = 0
         for loss_weight, loss in zip(self.loss_weights, [ce_loss, kl_loss, ss_loss, tf_loss]):
@@ -1273,6 +1365,7 @@ class PADL2Loss(nn.Module):
             eps: 0.000001
             reduction: 'mean'
     """
+
     def __init__(self, student_embed_module_path, teacher_embed_module_path,
                  student_embed_module_io='output', teacher_embed_module_io='output',
                  module_path='var_estimator', module_io='output', eps=1e-6, reduction='mean', **kwargs):
@@ -1288,11 +1381,14 @@ class PADL2Loss(nn.Module):
 
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
         log_variances = student_io_dict[self.module_path][self.module_io]
-        student_embed_outputs = student_io_dict[self.student_embed_module_path][self.student_embed_module_io].flatten(1)
-        teacher_embed_outputs = teacher_io_dict[self.teacher_embed_module_path][self.teacher_embed_module_io].flatten(1)
+        student_embed_outputs = student_io_dict[self.student_embed_module_path][self.student_embed_module_io].flatten(
+            1)
+        teacher_embed_outputs = teacher_io_dict[self.teacher_embed_module_path][self.teacher_embed_module_io].flatten(
+            1)
         # The author's provided code takes average of losses
         squared_losses = torch.mean(
-            (teacher_embed_outputs - student_embed_outputs) ** 2 / (self.eps + torch.exp(log_variances))
+            (teacher_embed_outputs - student_embed_outputs) ** 2 /
+            (self.eps + torch.exp(log_variances))
             + log_variances, dim=1
         )
         return squared_losses.mean() if self.reduction == 'mean' else squared_losses.sum()
@@ -1331,6 +1427,7 @@ class HierarchicalContextLoss(nn.Module):
             reduction: 'mean'
             output_sizes: [4, 2, 1]
     """
+
     def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io,
                  reduction='mean', output_sizes=None, **kwargs):
         super().__init__()
@@ -1355,10 +1452,13 @@ class HierarchicalContextLoss(nn.Module):
             if k >= h:
                 continue
 
-            proc_student_features = adaptive_avg_pool2d(student_features, (k, k))
-            proc_teacher_features = adaptive_avg_pool2d(teacher_features, (k, k))
+            proc_student_features = adaptive_avg_pool2d(
+                student_features, (k, k))
+            proc_teacher_features = adaptive_avg_pool2d(
+                teacher_features, (k, k))
             weight /= 2.0
-            loss += weight * self.criteria(proc_student_features, proc_teacher_features)
+            loss += weight * \
+                self.criteria(proc_student_features, proc_teacher_features)
             total_weight += weight
         return loss / total_weight
 
@@ -1377,6 +1477,7 @@ class RegularizationLoss(nn.Module):
     :param p: the order of norm.
     :type p: int
     """
+
     def __init__(self, module_path, io_type='output', is_from_teacher=False, p=1, **kwargs):
         super().__init__()
         self.module_path = module_path
@@ -1421,6 +1522,7 @@ class KTALoss(nn.Module):
             knowledge_translator_path: 'paraphraser.encoder'
             feature_adapter_path: 'feature_adapter'
     """
+
     def __init__(self, p=1, q=2, reduction='mean', knowledge_translator_path='paraphraser',
                  feature_adapter_path='feature_adapter', **kwargs):
         super().__init__()
@@ -1431,18 +1533,24 @@ class KTALoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
-        knowledge_translator_flat_outputs = teacher_io_dict[self.knowledge_translator_path]['output'].flatten(1)
-        feature_adapter_flat_outputs = student_io_dict[self.feature_adapter_path]['output'].flatten(1)
+        knowledge_translator_flat_outputs = teacher_io_dict[self.knowledge_translator_path]['output'].flatten(
+            1)
+        feature_adapter_flat_outputs = student_io_dict[self.feature_adapter_path]['output'].flatten(
+            1)
         norm_knowledge_translator_flat_outputs = \
             knowledge_translator_flat_outputs / \
-            knowledge_translator_flat_outputs.norm(p=self.norm_q, dim=1).unsqueeze(1)
+            knowledge_translator_flat_outputs.norm(
+                p=self.norm_q, dim=1).unsqueeze(1)
         norm_feature_adapter_flat_outputs = \
-            feature_adapter_flat_outputs / feature_adapter_flat_outputs.norm(p=self.norm_q, dim=1).unsqueeze(1)
+            feature_adapter_flat_outputs / \
+            feature_adapter_flat_outputs.norm(
+                p=self.norm_q, dim=1).unsqueeze(1)
         if self.norm_p == 1:
             return nn.functional.l1_loss(norm_feature_adapter_flat_outputs, norm_knowledge_translator_flat_outputs,
                                          reduction=self.reduction)
         kta_loss = \
-            torch.norm(norm_feature_adapter_flat_outputs - norm_knowledge_translator_flat_outputs, self.norm_p, dim=1)
+            torch.norm(norm_feature_adapter_flat_outputs -
+                       norm_knowledge_translator_flat_outputs, self.norm_p, dim=1)
         return kta_loss.mean() if self.reduction == 'mean' else kta_loss.sum()
 
 
@@ -1476,6 +1584,7 @@ class AffinityLoss(nn.Module):
             teacher_module_io: 'output'
             reduction: 'mean'
     """
+
     def __init__(self, student_module_path, teacher_module_path,
                  student_module_io='output', teacher_module_io='output', reduction='mean', **kwargs):
         super().__init__()
@@ -1486,12 +1595,17 @@ class AffinityLoss(nn.Module):
         self.reduction = reduction
 
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
-        student_flat_outputs = student_io_dict[self.student_module_path][self.student_module_io].flatten(2)
-        teacher_flat_outputs = teacher_io_dict[self.teacher_module_path][self.teacher_module_io].flatten(2)
+        student_flat_outputs = student_io_dict[self.student_module_path][self.student_module_io].flatten(
+            2)
+        teacher_flat_outputs = teacher_io_dict[self.teacher_module_path][self.teacher_module_io].flatten(
+            2)
         batch_size, ch_size, hw = student_flat_outputs.shape
-        student_flat_outputs = student_flat_outputs / student_flat_outputs.norm(p=2, dim=2).unsqueeze(-1)
-        teacher_flat_outputs = teacher_flat_outputs / teacher_flat_outputs.norm(p=2, dim=2).unsqueeze(-1)
-        total_squared_losses = torch.zeros(batch_size).to(student_flat_outputs.device)
+        student_flat_outputs = student_flat_outputs / \
+            student_flat_outputs.norm(p=2, dim=2).unsqueeze(-1)
+        teacher_flat_outputs = teacher_flat_outputs / \
+            teacher_flat_outputs.norm(p=2, dim=2).unsqueeze(-1)
+        total_squared_losses = torch.zeros(
+            batch_size).to(student_flat_outputs.device)
         for i in range(ch_size):
             total_squared_losses += (
                 (torch.bmm(student_flat_outputs[:, i].unsqueeze(2), student_flat_outputs[:, i].unsqueeze(1))
@@ -1551,8 +1665,10 @@ class ChSimLoss(nn.Module):
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
         chsim_loss = 0
         for pair_name, pair_config in self.feature_pairs.items():
-            teacher_outputs = _extract_feature_map(teacher_io_dict, pair_config['teacher'])
-            student_outputs = _extract_feature_map(student_io_dict, pair_config['student'])
+            teacher_outputs = _extract_feature_map(
+                teacher_io_dict, pair_config['teacher'])
+            student_outputs = _extract_feature_map(
+                student_io_dict, pair_config['student'])
             weight = pair_config.get('weight', 1)
             loss = self.batch_loss(student_outputs, teacher_outputs)
             chsim_loss += weight * loss
@@ -1616,64 +1732,456 @@ class DISTLoss(nn.Module):
 
 
 @register_mid_level_loss
-class SRDLoss(nn.Module):
+
+class MSELoss(nn.Module):
     """
-    A loss module for Understanding the Role of the Projector in Knowledge Distillation.
-    Referred to https://github.com/roymiles/Simple-Recipe-Distillation/blob/main/imagenet/torchdistill/losses/single.py
+    A loss module for the Knowledge Distillation from two embedding features
+    Referred to https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
 
-    Roy Miles, Krystian Mikolajczyk: `"Understanding the Role of the Projector in Knowledge Distillation" <https://arxiv.org/abs/2303.11098>`_ @ AAAI 2024 (2024)
+    :param student_module_path: student model's logit module path.
+    :type student_module_path: str
+    :param student_module_io: 'input' or 'output' of the module in the student model.
+    :type student_module_io: str
+    :param teacher_module_path: teacher model's logit module path.
+    :type teacher_module_path: str
+    :param teacher_module_io: 'input' or 'output' of the module in the teacher model.
 
-    :param student_feature_module_path: student model's feature module path in an auxiliary wrapper :class:`torchdistill.models.wrapper.SRDModelWrapper`.
-    :type student_feature_module_path: str
-    :param student_feature_module_io: 'input' or 'output' of the feature module in the student model.
-    :type student_feature_module_io: str
-    :param teacher_feature_module_path: teacher model's feature module path in an auxiliary wrapper :class:`torchdistill.models.wrapper.SRDModelWrapper`.
-    :type teacher_feature_module_path: str
-    :param teacher_feature_module_io: 'input' or 'output' of the feature module in the teacher model.
-    :type teacher_feature_module_io: str
-    :param student_linear_module_path: student model's linear module path.
-    :type student_linear_module_path: str
-    :param student_linear_module_io: 'input' or 'output' of the linear module in the student model.
-    :type student_linear_module_io: str
-    :param teacher_linear_module_path: teacher model's linear module path.
-    :type teacher_linear_module_path: str
-    :param teacher_linear_module_io: 'input' or 'output' of the linear module in the teacher model.
-    :type teacher_linear_module_io: str
-    :param exponent: exponent for feature distillation loss.
-    :type exponent: float
-    :param temperature: hyperparameter :math:`\\tau` to soften class-probability distributions.
-    :type temperature: float
-    :param reduction: loss reduction type.
-    :type reduction: str or None
     """
 
-    def __init__(self, student_feature_module_path, student_feature_module_io,
-                 teacher_feature_module_path, teacher_feature_module_io,
-                 student_linear_module_path, student_linear_module_io,
-                 teacher_linear_module_path, teacher_linear_module_io,
-                 exponent=1.0, temperature=1.0, reduction='batchmean', **kwargs):
+    def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io, **kwargs):
         super().__init__()
-        self.student_feature_module_path = student_feature_module_path
-        self.student_feature_module_io = student_feature_module_io
-        self.teacher_feature_module_path = teacher_feature_module_path
-        self.teacher_feature_module_io = teacher_feature_module_io
-        self.student_linear_module_path = student_linear_module_path
-        self.student_linear_module_io = student_linear_module_io
-        self.teacher_linear_module_path = teacher_linear_module_path
-        self.teacher_linear_module_io = teacher_linear_module_io
-        self.exponent = exponent
-        self.temperature = temperature
-        self.criterion = nn.KLDivLoss(reduction=reduction)
+        self.student_module_path = student_module_path
+        self.student_module_io = student_module_io
+        self.teacher_module_path = teacher_module_path
+        self.teacher_module_io = teacher_module_io
+        self.mse_loss = nn.MSELoss()
 
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
-        student_features = student_io_dict[self.student_feature_module_path][self.student_feature_module_io]
-        teacher_features = teacher_io_dict[self.teacher_feature_module_path][self.teacher_feature_module_io]
-        diff_features = torch.abs(student_features - teacher_features)
-        feat_distill_loss = torch.log(diff_features.pow(self.exponent).sum())
+        student_feature_map = student_io_dict[self.student_module_path][self.student_module_io]
+        teacher_feature_map = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        hidden_rep_loss = self.mse_loss(
+            student_feature_map, teacher_feature_map)
+        return hidden_rep_loss
 
-        student_logits = student_io_dict[self.student_linear_module_path][self.student_linear_module_io]
-        teacher_logits = teacher_io_dict[self.teacher_linear_module_path][self.teacher_linear_module_io]
-        kl_loss = self.criterion(torch.log_softmax(student_logits / self.temperature, dim=1),
-                                 torch.softmax(teacher_logits / self.temperature, dim=1))
-        loss = 2 * feat_distill_loss + kl_loss
+
+@register_mid_level_loss
+class CosineLoss(nn.Module):
+    """
+    A loss module for the Knowledge Distillation from two embedding features
+    Referred to https://pytorch.org/tutorials/beginner/knowledge_distillation_tutorial.html
+
+    :param student_module_path: student model's logit module path.
+    :type student_module_path: str
+    :param student_module_io: 'input' or 'output' of the module in the student model.
+    :type student_module_io: str
+    :param teacher_module_path: teacher model's logit module path.
+    :type teacher_module_path: str
+    :param teacher_module_io: 'input' or 'output' of the module in the teacher model.
+
+    """
+
+    def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io, size=64, **kwargs):
+        super().__init__()
+        self.student_module_path = student_module_path
+        self.student_module_io = student_module_io
+        self.teacher_module_path = teacher_module_path
+        self.teacher_module_io = teacher_module_io
+        self.cosine_loss = nn.CosineEmbeddingLoss()
+        self.size = size
+
+    def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
+        student_hidden_representation = student_io_dict[self.student_module_path][self.student_module_io]
+        teacher_hidden_representation = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        # print(student_hidden_representation)
+        student_hidden_representation = student_hidden_representation.view(
+            self.size, -1)
+        teacher_hidden_representation = teacher_hidden_representation.view(
+            self.size, -1)
+
+        hidden_rep_loss = self.cosine_loss(student_hidden_representation, teacher_hidden_representation, target=torch.ones(
+            self.size).to(student_hidden_representation.device))
+        return hidden_rep_loss
+
+
+@register_mid_level_loss
+class DKDLoss(nn.Module):
+    """
+    A loss module for Decoupled Knowledge Distillation(CVPR 2022)
+    Referred to https://github.com/hunto/image_classification_sota/blob/main/lib/models/losses/dist_kd.py
+
+    Tao Huang, Shan You, Fei Wang, Chen Qian, Chang Xu: `"https://proceedings.neurips.cc/paper_files/paper/2022/hash/da669dfd3c36c93905a17ddba01eef06-Abstract-Conference.html>`_ @ NeurIPS 2022 (2022)
+
+    :param student_module_path: student model's logit module path.
+    :type student_module_path: str
+    :param student_module_io: 'input' or 'output' of the module in the student model.
+    :type student_module_io: str
+    :param teacher_module_path: teacher model's logit module path.
+    :type teacher_module_path: str
+    :param teacher_module_io: 'input' or 'output' of the module in the teacher model.
+    :param beta: balancing factor for inter-loss.
+    :type beta: float
+    :param gamma: balancing factor for intra-loss.
+    :type gamma: float
+    :param tau: hyperparameter :math:`\\tau` to soften class-probability distributions.
+    :type tau: float
+    """
+
+    def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io,
+                 alpha=1.0, beta=1.0, T=1.0, **kwargs):
+        super().__init__()
+        self.student_module_path = student_module_path
+        self.student_module_io = student_module_io
+        self.teacher_module_path = teacher_module_path
+        self.teacher_module_io = teacher_module_io
+        self.beta = beta
+        self.alpha = alpha
+        self.beta = beta
+        self.T = T
+
+    def dkd_loss(self, s_logits, t_logits, labels):
+        gt_mask = self.get_gt_mask(s_logits, labels)
+        other_mask = self.get_other_mask(s_logits, labels)
+        s_pred = F.softmax(s_logits / self.T, dim=1)
+        t_pred = F.softmax(t_logits / self.T, dim=1)
+        s_pred = self.cat_mask(s_pred, gt_mask, other_mask)
+        t_pred = self.cat_mask(t_pred, gt_mask, other_mask)
+        s_log_pred = torch.log(s_pred)
+        tckd_loss = (
+            F.kl_div(s_log_pred, t_pred)
+            * (self.T**2)
+            / labels.shape[0]
+        )
+        pred_teacher_part2 = F.softmax(
+            t_logits / self.T - 1000.0 * gt_mask, dim=1
+        )
+        log_pred_student_part2 = F.log_softmax(
+            s_logits / self.T - 1000.0 * gt_mask, dim=1
+        )
+        nckd_loss = (
+            F.kl_div(log_pred_student_part2, pred_teacher_part2)
+            * (self.T**2)
+            / labels.shape[0]
+        )
+        return self.alpha * tckd_loss + self.beta * nckd_loss
+
+    def get_gt_mask(self, logits, labels):
+        labels = labels.reshape(-1)
+        mask = torch.zeros_like(logits).scatter_(
+            1, labels.unsqueeze(1), 1).bool()
+        return mask
+
+    def get_other_mask(self, logits, labels):
+        labels = labels.reshape(-1)
+        mask = torch.ones_like(logits).scatter_(
+            1, labels.unsqueeze(1), 0).bool()
+        return mask
+
+    def cat_mask(self, t, mask1, mask2):
+        t1 = (t * mask1).sum(dim=1, keepdims=True)
+        t2 = (t * mask2).sum(1, keepdims=True)
+        rt = torch.cat([t1, t2], dim=1)
+        return rt
+
+    def forward(self, student_io_dict, teacher_io_dict, labels, *args, **kwargs):
+        student_logits = student_io_dict[self.student_module_path][self.student_module_io]
+        teacher_logits = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        loss = self.dkd_loss(student_logits, teacher_logits, labels)
+
         return loss
+
+
+@register_mid_level_loss
+class KDSVD(nn.Module):
+    """
+    Self-supervised Knowledge Distillation using Singular Value Decomposition
+    original Tensorflow code: https://github.com/sseung0703/SSKD_SVD
+    """
+
+    def __init__(self, student_module_path, student_module_io, teacher_module_path, teacher_module_io, k=1, **kwargs):
+        super(KDSVD, self).__init__()
+        self.k = k
+
+    def forward(self, student_io_dict, teacher_io_dict, labels, *args, **kwargs):
+        g_s, g_t = student_io_dict[self.student_module_path][
+            self.student_module_io], teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        v_sb = None
+        v_tb = None
+        losses = []
+        for i, f_s, f_t in zip(range(len(g_s)), g_s, g_t):
+
+            u_t, s_t, v_t = self.svd(f_t, self.k)
+            u_s, s_s, v_s = self.svd(f_s, self.k + 3)
+            v_s, v_t = self.align_rsv(v_s, v_t)
+            s_t = s_t.unsqueeze(1)
+            v_t = v_t * s_t
+            v_s = v_s * s_t
+
+            if i > 0:
+                s_rbf = torch.exp(-(v_s.unsqueeze(2) -
+                                  v_sb.unsqueeze(1)).pow(2) / 8)
+                t_rbf = torch.exp(-(v_t.unsqueeze(2) -
+                                  v_tb.unsqueeze(1)).pow(2) / 8)
+
+                l2loss = (s_rbf - t_rbf.detach()).pow(2)
+                l2loss = torch.where(torch.isfinite(
+                    l2loss), l2loss, torch.zeros_like(l2loss))
+                losses.append(l2loss.sum())
+
+            v_tb = v_t
+            v_sb = v_s
+
+        bsz = g_s[0].shape[0]
+        losses = [l / bsz for l in losses]
+        return losses
+
+    def svd(self, feat, n=1):
+        size = feat.shape
+        assert len(size) == 4
+
+        x = feat.view(-1, size[1], size[2] * size[2]).transpose(-2, -1)
+        u, s, v = torch.svd(x)
+
+        u = self.removenan(u)
+        s = self.removenan(s)
+        v = self.removenan(v)
+
+        if n > 0:
+            u = F.normalize(u[:, :, :n], dim=1)
+            s = F.normalize(s[:, :n], dim=1)
+            v = F.normalize(v[:, :, :n], dim=1)
+
+        return u, s, v
+
+    @staticmethod
+    def removenan(x):
+        x = torch.where(torch.isfinite(x), x, torch.zeros_like(x))
+        return x
+
+    @staticmethod
+    def align_rsv(a, b):
+        cosine = torch.matmul(a.transpose(-2, -1), b)
+        max_abs_cosine, _ = torch.max(torch.abs(cosine), 1, keepdim=True)
+        mask = torch.where(torch.eq(max_abs_cosine, torch.abs(cosine)),
+                           torch.sign(cosine), torch.zeros_like(cosine))
+        a = torch.matmul(a, mask)
+        return a, b
+
+
+# @register_mid_level_loss
+# class DINOLoss(nn.Module):
+#     '''
+#     Copyright 3D-Speaker (https://github.com/alibaba-damo-academy/3D-Speaker).
+#     '''
+#     def __init__(
+#         self, student_module_path, student_module_io, teacher_module_path, teacher_module_io,
+#         out_dim,
+#         ncrops,
+#         warmup_teacher_temp,
+#         teacher_temp,
+#         warmup_teacher_temp_epochs,
+#         nepochs,
+#         student_temp=0.1,
+#         center_momentum=0.9, **kwargs
+#     ):
+#         super().__init__()
+#         self.student_module_path = student_module_path
+#         self.student_module_io = student_module_io
+#         self.teacher_module_path = teacher_module_path
+#         self.teacher_module_io = teacher_module_io
+
+#         self.student_temp = student_temp
+#         self.center_momentum = center_momentum
+#         self.ncrops = ncrops
+#         self.register_buffer("center", torch.zeros(1, out_dim))
+#         self.teacher_temp_schedule = np.concatenate((np.linspace(warmup_teacher_temp, teacher_temp, warmup_teacher_temp_epochs),
+#                                                      np.ones(nepochs - warmup_teacher_temp_epochs) * teacher_temp))
+
+#     def forward(self, student_io_dict, teacher_io_dict, epoch, *args, **kwargs):
+#         """
+#         Cross-entropy between softmax outputs of the teacher and student networks.
+#         """
+#         student_output = student_io_dict[self.student_module_path][self.student_module_io]
+#         teacher_output = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+
+#         student_out = student_output / self.student_temp
+#         student_out = student_out.chunk(self.ncrops)
+
+#         # teacher centering and sharpening
+#         temp = self.teacher_temp_schedule[epoch]
+#         teacher_out = F.softmax((teacher_output - self.center) / temp, dim=-1)
+#         teacher_out = teacher_out.detach().chunk(2)
+
+#         total_loss = 0
+#         n_loss_terms = 0
+#         for iq, q in enumerate(teacher_out):
+#             for v in range(len(student_out)):
+#                 if v == iq:
+#                     # we skip cases where student and teacher operate on the same view
+#                     continue
+#                 loss = torch.sum(-q * F.log_softmax(student_out[v], dim=-1), dim=-1)
+#                 total_loss += loss.mean()
+#                 n_loss_terms += 1
+#         total_loss /= n_loss_terms
+#         self.update_center(teacher_output)
+#         return total_loss
+
+#     @torch.no_grad()
+#     def update_center(self, teacher_output):
+#         """
+#         Update center used for teacher output.
+#         """
+#         batch_center = torch.sum(teacher_output, dim=0, keepdim=True)
+#         dist.all_reduce(batch_center)
+#         batch_center = batch_center / (len(teacher_output) * dist.get_world_size())
+
+#         # ema update
+#         self.center = self.center * self.center_momentum + batch_center * (1 - self.center_momentum)
+
+
+@register_mid_level_loss
+class OCKDLoss(nn.Module):
+    """
+    A loss module for One-Class Knowledge Distillation for Spoofing Speech Detection
+    Referred to https://arxiv.org/abs/2309.08285
+
+    :param student_module_path: student model's logit module path.
+    :type student_module_path: str
+    :param student_module_io: 'input' or 'output' of the module in the student model.
+    :type student_module_io: str
+    :param teacher_module_path: teacher model's logit module path.
+    :type teacher_module_path: str
+    :param teacher_module_io: 'input' or 'output' of the module in the teacher model.
+
+    criterion:
+          key: 'OCKDLoss'
+          kwargs:
+            at_pairs:
+              pair1:
+                teacher:
+                  io: 'output'
+                  path: 'layer3'
+                student:
+                  io: 'output'
+                  path: 'layer3'
+              pair2:
+                teacher:
+                  io: 'output'
+                  path: 'layer4'
+                student:
+                  io: 'output'
+                  path: 'layer4'
+            lambda: 0.00001
+
+    """
+
+    def __init__(self, at_pairs, lamd, batch_size, **kwargs):
+        super().__init__()
+        self.at_pairs = at_pairs
+        self.lamd = lamd
+        self.batch_size = batch_size
+        self.cosine_loss = nn.CosineEmbeddingLoss()
+        self.mse_loss = nn.MSELoss()
+
+    def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
+        ockd_loss = 0
+        total_cosine_similarity_loss = 0
+        total_mse_loss = 0
+        for pair_name, pair_config in self.at_pairs.items():
+            # Student's feature map is size of (202, batch_size,768)
+            student_feature_map = _extract_feature_map(
+                student_io_dict, pair_config['student'])
+            # Teacher's feature map is size of (202, batch_size,1024)
+            teacher_feature_map = _extract_feature_map(
+                teacher_io_dict, pair_config['teacher'])
+
+            # Calculate the cosine similarity between the teacher and student feature maps
+            # Upgrade the student feature map to the size of the teacher feature map
+            # Check the size of the teacher feature map and student feature map
+            if student_feature_map.size() != teacher_feature_map.size():
+                # Apply the average pooling to the teacher feature map
+
+               # Reduce the teacher feature map to the same size as the student feature map
+                teacher_feature_map = F.adaptive_avg_pool1d(
+                    teacher_feature_map, student_feature_map.shape[-1])
+
+            student_feature_map = student_feature_map.view(self.batch_size, -1)
+            teacher_feature_map = teacher_feature_map.view(self.batch_size, -1)
+
+            print(student_feature_map.size())
+            print(teacher_feature_map.size())
+
+            cosine_similarity = self.cosine_loss(student_feature_map, teacher_feature_map, torch.ones(
+                self.batch_size).to(student_feature_map.device))
+
+            # Calculate the mean squared error between the teacher and student feature maps
+            mse_loss = self.mse_loss(student_feature_map, teacher_feature_map)
+
+            total_cosine_similarity_loss += cosine_similarity
+            total_mse_loss += mse_loss
+
+        ockd_loss = total_cosine_similarity_loss + self.lamd * total_mse_loss
+
+        return ockd_loss
+# =======
+# class SRDLoss(nn.Module):
+#     """
+#     A loss module for Understanding the Role of the Projector in Knowledge Distillation.
+#     Referred to https://github.com/roymiles/Simple-Recipe-Distillation/blob/main/imagenet/torchdistill/losses/single.py
+
+#     Roy Miles, Krystian Mikolajczyk: `"Understanding the Role of the Projector in Knowledge Distillation" <https://arxiv.org/abs/2303.11098>`_ @ AAAI 2024 (2024)
+
+#     :param student_feature_module_path: student model's feature module path in an auxiliary wrapper :class:`torchdistill.models.wrapper.SRDModelWrapper`.
+#     :type student_feature_module_path: str
+#     :param student_feature_module_io: 'input' or 'output' of the feature module in the student model.
+#     :type student_feature_module_io: str
+#     :param teacher_feature_module_path: teacher model's feature module path in an auxiliary wrapper :class:`torchdistill.models.wrapper.SRDModelWrapper`.
+#     :type teacher_feature_module_path: str
+#     :param teacher_feature_module_io: 'input' or 'output' of the feature module in the teacher model.
+#     :type teacher_feature_module_io: str
+#     :param student_linear_module_path: student model's linear module path.
+#     :type student_linear_module_path: str
+#     :param student_linear_module_io: 'input' or 'output' of the linear module in the student model.
+#     :type student_linear_module_io: str
+#     :param teacher_linear_module_path: teacher model's linear module path.
+#     :type teacher_linear_module_path: str
+#     :param teacher_linear_module_io: 'input' or 'output' of the linear module in the teacher model.
+#     :type teacher_linear_module_io: str
+#     :param exponent: exponent for feature distillation loss.
+#     :type exponent: float
+#     :param temperature: hyperparameter :math:`\\tau` to soften class-probability distributions.
+#     :type temperature: float
+#     :param reduction: loss reduction type.
+#     :type reduction: str or None
+#     """
+
+#     def __init__(self, student_feature_module_path, student_feature_module_io,
+#                  teacher_feature_module_path, teacher_feature_module_io,
+#                  student_linear_module_path, student_linear_module_io,
+#                  teacher_linear_module_path, teacher_linear_module_io,
+#                  exponent=1.0, temperature=1.0, reduction='batchmean', **kwargs):
+#         super().__init__()
+#         self.student_feature_module_path = student_feature_module_path
+#         self.student_feature_module_io = student_feature_module_io
+#         self.teacher_feature_module_path = teacher_feature_module_path
+#         self.teacher_feature_module_io = teacher_feature_module_io
+#         self.student_linear_module_path = student_linear_module_path
+#         self.student_linear_module_io = student_linear_module_io
+#         self.teacher_linear_module_path = teacher_linear_module_path
+#         self.teacher_linear_module_io = teacher_linear_module_io
+#         self.exponent = exponent
+#         self.temperature = temperature
+#         self.criterion = nn.KLDivLoss(reduction=reduction)
+
+#     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
+#         student_features = student_io_dict[self.student_feature_module_path][self.student_feature_module_io]
+#         teacher_features = teacher_io_dict[self.teacher_feature_module_path][self.teacher_feature_module_io]
+#         diff_features = torch.abs(student_features - teacher_features)
+#         feat_distill_loss = torch.log(diff_features.pow(self.exponent).sum())
+
+#         student_logits = student_io_dict[self.student_linear_module_path][self.student_linear_module_io]
+#         teacher_logits = teacher_io_dict[self.teacher_linear_module_path][self.teacher_linear_module_io]
+#         kl_loss = self.criterion(torch.log_softmax(student_logits / self.temperature, dim=1),
+#                                  torch.softmax(teacher_logits / self.temperature, dim=1))
+#         loss = 2 * feat_distill_loss + kl_loss
+#         return loss
+# >>>>>>> main
