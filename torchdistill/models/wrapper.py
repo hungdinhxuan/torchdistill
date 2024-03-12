@@ -803,7 +803,7 @@ class ChannelSimilarityEmbed(nn.Module):
     """
     An auxiliary module for Inter-Channel Correlation for Knowledge Distillation (ICKD). Refactored https://github.com/ADLab-AutoDrive/ICKD/blob/main/ImageNet/torchdistill/models/special.py
 
-    Li Liu, Qingle Huang, Sihao Lin, Hongwei Xie, Bing Wang, Xiaojun Chang, Xiaodan Liang: `"https://openaccess.thecvf.com/content/ICCV2021/html/Liu_Exploring_Inter-Channel_Correlation_for_Diversity-Preserved_Knowledge_Distillation_ICCV_2021_paper.html>`_ @ ICCV 2021 (2021)
+    Li Liu, Qingle Huang, Sihao Lin, Hongwei Xie, Bing Wang, Xiaojun Chang, Xiaodan Liang: `"Inter-Channel Correlation for Knowledge Distillation" <https://openaccess.thecvf.com/content/ICCV2021/html/Liu_Exploring_Inter-Channel_Correlation_for_Diversity-Preserved_Knowledge_Distillation_ICCV_2021_paper.html>`_ @ ICCV 2021 (2021)
 
     :param in_channels: number of input channels for the convolution layer.
     :type in_channels: int
@@ -827,7 +827,7 @@ class Student4ICKD(AuxiliaryModelWrapper):
     An auxiliary student model wrapper for Inter-Channel Correlation for Knowledge Distillation (ICKD).
     Referred to https://github.com/ADLab-AutoDrive/ICKD/blob/main/ImageNet/torchdistill/models/special.py
 
-    Li Liu, Qingle Huang, Sihao Lin, Hongwei Xie, Bing Wang, Xiaojun Chang, Xiaodan Liang: `"https://openaccess.thecvf.com/content/ICCV2021/html/Liu_Exploring_Inter-Channel_Correlation_for_Diversity-Preserved_Knowledge_Distillation_ICCV_2021_paper.html>`_ @ ICCV 2021 (2021)
+    Li Liu, Qingle Huang, Sihao Lin, Hongwei Xie, Bing Wang, Xiaojun Chang, Xiaodan Liang: `"Inter-Channel Correlation for Knowledge Distillation" <https://openaccess.thecvf.com/content/ICCV2021/html/Liu_Exploring_Inter-Channel_Correlation_for_Diversity-Preserved_Knowledge_Distillation_ICCV_2021_paper.html>`_ @ ICCV 2021 (2021)
 
     :param student_model: student model.
     :type student_model: nn.Module
@@ -859,6 +859,60 @@ class Student4ICKD(AuxiliaryModelWrapper):
             self.embed_dict[embed_key](io_dict[module_path][io_type])
 
 
+@register_auxiliary_model_wrapper
+class SRDModelWrapper(AuxiliaryModelWrapper):
+    """
+    An auxiliary model wrapper for Understanding the Role of the Projector in Knowledge Distillation.
+    Referred to https://github.com/roymiles/Simple-Recipe-Distillation/blob/main/imagenet/torchdistill/losses/single.py
+
+    Roy Miles, Krystian Mikolajczyk: `"Understanding the Role of the Projector in Knowledge Distillation" <https://arxiv.org/abs/2303.11098>`_ @ AAAI 2024 (2024)
+
+    :param model: model.
+    :type model: nn.Module
+    :param input_module: input module configuration.
+    :type input_module: dict
+    :param linear_kwargs: nn.Linear keyword arguments.
+    :type linear_kwargs: dict or None
+    :param norm_kwargs: nn.BatchNorm1d keyword arguments.
+    :type norm_kwargs: dict
+    :param device: target device.
+    :type device: torch.device
+    :param device_ids: target device IDs.
+    :type device_ids: list[int]
+    :param distributed: whether to be in distributed training mode.
+    :type distributed: bool
+    :param teacher_model: teacher model.
+    :type teacher_model: nn.Module or None
+    :param student_model: student model.
+    :type student_model: nn.Module or None
+    :param find_unused_parameters: ``find_unused_parameters`` for DistributedDataParallel.
+    :type find_unused_parameters: bool or None
+    """
+    def __init__(self, input_module, norm_kwargs, device, device_ids, distributed, linear_kwargs=None,
+                 teacher_model=None, student_model=None, find_unused_parameters=None, **kwargs):
+        super().__init__()
+        is_teacher = teacher_model is not None
+        if not is_teacher:
+            student_model = wrap_if_distributed(student_model, device, device_ids, distributed, find_unused_parameters)
+
+        self.model = teacher_model if is_teacher else student_model
+        self.input_module_path = input_module['path']
+        self.input_module_io = input_module['io']
+        self.linear = wrap_if_distributed(nn.Linear(**linear_kwargs), device, device_ids, distributed) \
+            if isinstance(linear_kwargs, dict) else None
+        self.norm_layer = wrap_if_distributed(nn.BatchNorm1d(**norm_kwargs), device, device_ids, distributed)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def secondary_forward(self, io_dict):
+        z = io_dict[self.input_module_path][self.input_module_io]
+        z = z.mean(-1).mean(-1)
+        if self.linear is not None:
+            z = self.linear(z)
+        self.norm_layer(z)
+
+
 def build_auxiliary_model_wrapper(model_config, **kwargs):
     """
     Builds an auxiliary model wrapper for either teacher or student models.
@@ -876,4 +930,8 @@ def build_auxiliary_model_wrapper(model_config, **kwargs):
     auxiliary_model_wrapper_kwargs = auxiliary_model_wrapper_config.get('kwargs', None)
     if auxiliary_model_wrapper_kwargs is None:
         auxiliary_model_wrapper_kwargs = dict()
+    elif 'teacher_model' in kwargs:
+        kwargs['teacher_model'] = redesign_model(kwargs['teacher_model'], auxiliary_model_wrapper_config, 'teacher', 'pre-auxiliary')
+    elif 'student_model' in kwargs:
+        kwargs['student_model'] = redesign_model(kwargs['student_model'], auxiliary_model_wrapper_config, 'student', 'pre-auxiliary')
     return get_auxiliary_model_wrapper(auxiliary_model_wrapper_key, **kwargs, **auxiliary_model_wrapper_kwargs)
