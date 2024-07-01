@@ -182,11 +182,11 @@ class KDLoss(nn.KLDivLoss):
         teacher_logits = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
         soft_loss = super().forward(torch.log_softmax(student_logits / self.temperature, dim=1),
                                     torch.softmax(teacher_logits / self.temperature, dim=1))
-        if self.alpha is None or self.alpha == 0 or targets is None:
-            return soft_loss
-
-        hard_loss = self.cross_entropy_loss(student_logits, targets)
-        return self.alpha * hard_loss + self.beta * (self.temperature ** 2) * soft_loss
+        # if self.alpha is None or self.alpha == 0 or targets is None:
+        # return soft_loss
+        return self.beta * (self.temperature ** 2) * soft_loss
+        # hard_loss = self.cross_entropy_loss(student_logits, targets)
+        # return self.alpha * hard_loss + self.beta * (self.temperature ** 2) * soft_loss
 
 
 @register_mid_level_loss
@@ -1732,7 +1732,6 @@ class DISTLoss(nn.Module):
 
 
 @register_mid_level_loss
-
 class MSELoss(nn.Module):
     """
     A loss module for the Knowledge Distillation from two embedding features
@@ -1759,6 +1758,12 @@ class MSELoss(nn.Module):
     def forward(self, student_io_dict, teacher_io_dict, *args, **kwargs):
         student_feature_map = student_io_dict[self.student_module_path][self.student_module_io]
         teacher_feature_map = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
+        # Check if student_feature_map and teacher_feature_map are tuple then take the first element
+        if isinstance(student_feature_map, tuple):
+            student_feature_map = student_feature_map[0]
+        if isinstance(teacher_feature_map, tuple):
+            teacher_feature_map = teacher_feature_map[0]
+
         hidden_rep_loss = self.mse_loss(
             student_feature_map, teacher_feature_map)
         return hidden_rep_loss
@@ -1883,6 +1888,8 @@ class DKDLoss(nn.Module):
         return rt
 
     def forward(self, student_io_dict, teacher_io_dict, labels, *args, **kwargs):
+        # print(student_io_dict)
+        # print(student_io_dict[self.student_module_path])
         student_logits = student_io_dict[self.student_module_path][self.student_module_io]
         teacher_logits = teacher_io_dict[self.teacher_module_path][self.teacher_module_io]
         loss = self.dkd_loss(student_logits, teacher_logits, labels)
